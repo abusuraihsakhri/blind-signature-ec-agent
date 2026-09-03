@@ -13,17 +13,23 @@ Interactive & command-driven interface for:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from typing import Any, Dict, List, Optional
 
 from blind_signature_ec import (
+    G,
+    N,
     BlindSignature,
     BlindSignatureProtocol,
     DoubleSpendRegistry,
     ECPoint,
     KeyPair,
     ZKProofEngine,
+    hash_to_scalar,
+    point_add,
+    point_mul,
 )
 
 
@@ -224,6 +230,142 @@ def cmd_interactive() -> int:
     return 0
 
 
+def cmd_batch(args: argparse.Namespace) -> int:
+    import csv
+
+    input_path = args.input
+    output_path = args.output
+
+    try:
+        with open(input_path, mode="r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+    except Exception as e:
+        print(f"Error reading input CSV '{input_path}': {e}", file=sys.stderr)
+        return 1
+
+    registry = DoubleSpendRegistry()
+    out_rows = []
+    extra_fields = [
+        "message_hash",
+        "signer_pubkey",
+        "commitment_r",
+        "blinded_point_t",
+        "blinded_challenge_chat",
+        "blinded_sig_shat",
+        "unblinded_sigma",
+        "verification_result",
+        "zk_verification_result",
+        "redemption_status",
+        "double_spend_flag",
+    ]
+
+    for r in rows:
+        row_dict = dict(r)
+        operation = row_dict.get("operation", "issue_and_verify").strip().lower()
+        msg_str = row_dict.get("message", "token-record")
+        msg_bytes = msg_str.encode("utf-8")
+        msg_hash = hashlib.sha256(msg_bytes).hexdigest()
+        row_dict["message_hash"] = msg_hash
+
+        # Check if keys/factors are provided, otherwise generate deterministically or randomly
+        priv_hex = row_dict.get("signer_privkey", "").strip()
+        if priv_hex:
+            d = int(priv_hex, 16) % N
+            kp = KeyPair(secret_key=d, public_key=point_mul(d, G))
+        else:
+            kp = KeyPair.generate()
+
+        row_dict["signer_pubkey"] = kp.public_key.to_hex(compressed=True)
+
+        k_hex = row_dict.get("signer_nonce_k", "").strip()
+        if k_hex:
+            k = int(k_hex, 16) % N
+            R = point_mul(k, G)
+        else:
+            k, R = BlindSignatureProtocol.signer_step1_commit()
+        row_dict["commitment_r"] = R.to_hex(compressed=True)
+
+        # Blinding factors alpha, beta
+        alpha_hex = row_dict.get("alpha_factor", "").strip()
+        beta_hex = row_dict.get("beta_factor", "").strip()
+
+        if alpha_hex and beta_hex:
+            alpha = int(alpha_hex, 16) % N
+            beta = int(beta_hex, 16) % N
+            t1 = point_mul(alpha, R)
+            t2 = point_mul(beta, G)
+            T = point_add(t1, t2)
+            t_bytes = T.x.to_bytes(32, "big")
+            c = hash_to_scalar(msg_bytes, t_bytes)
+            if c == 0:
+                c = 1
+            c_hat = (c * pow(alpha, -1, N)) % N
+            from blind_signature_ec import BlindSession
+            sess = BlindSession(alpha=alpha, beta=beta, T=T, message=msg_bytes, blinded_challenge=c_hat)
+        else:
+            sess, c_hat = BlindSignatureProtocol.client_step2_blind(msg_bytes, R)
+
+        row_dict["blinded_point_t"] = sess.T.to_hex(compressed=True)
+        row_dict["blinded_challenge_chat"] = f"{c_hat:064x}"
+
+        # Signer signs blinded challenge
+        s_hat = BlindSignatureProtocol.signer_step3_sign(c_hat, k, kp)
+        row_dict["blinded_sig_shat"] = f"{s_hat:064x}"
+
+        # Client unblinds signature
+        sig = BlindSignatureProtocol.client_step4_unblind(sess, s_hat)
+        row_dict["unblinded_sigma"] = f"{sig.sigma:064x}"
+
+        # Verification
+        if operation == "tampered_signature":
+            # Tamper the signature to test negative verification
+            corrupted_sig = BlindSignature(T=sig.T, sigma=(sig.sigma + 1) % N, message=sig.message)
+            is_valid = BlindSignatureProtocol.verify(corrupted_sig, kp.public_key)
+            sig_to_redeem = corrupted_sig
+        elif operation == "tampered_message":
+            corrupted_sig = BlindSignature(T=sig.T, sigma=sig.sigma, message=b"tampered-" + sig.message)
+            is_valid = BlindSignatureProtocol.verify(corrupted_sig, kp.public_key)
+            sig_to_redeem = corrupted_sig
+        else:
+            is_valid = BlindSignatureProtocol.verify(sig, kp.public_key)
+            sig_to_redeem = sig
+
+        row_dict["verification_result"] = "PASS" if is_valid else "FAIL"
+
+        # ZK Proof of Knowledge of signer private key
+        zk_proof = ZKProofEngine.schnorr_pok_prove(kp.secret_key)
+        zk_valid = ZKProofEngine.schnorr_pok_verify(zk_proof)
+        row_dict["zk_verification_result"] = "PASS" if zk_valid else "FAIL"
+
+        # Double spend redemption simulation
+        token_id = row_dict.get("token_id", f"TOK-{len(out_rows) + 1:04d}").strip()
+        redemption = registry.redeem_token(token_id, sig_to_redeem, kp.public_key)
+        row_dict["redemption_status"] = "ACCEPTED" if redemption["accepted"] else "REJECTED"
+        row_dict["double_spend_flag"] = "TRUE" if redemption.get("double_spend") else "FALSE"
+
+        out_rows.append(row_dict)
+
+    # Compile all fieldnames ensuring order
+    final_fields = list(fieldnames)
+    for f_name in extra_fields:
+        if f_name not in final_fields:
+            final_fields.append(f_name)
+
+    try:
+        with open(output_path, mode="w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=final_fields)
+            writer.writeheader()
+            writer.writerows(out_rows)
+        print(f"Batch processed {len(out_rows)} records: '{input_path}' -> '{output_path}'")
+    except Exception as e:
+        print(f"Error writing output CSV '{output_path}': {e}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="blind_signature_ec_cli",
@@ -256,6 +398,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ds = subparsers.add_parser("double-spend", help="Test double-spend token redemption registry")
     p_ds.add_argument("--json", action="store_true", help="Output JSON")
 
+    # Subcommand: batch
+    p_batch = subparsers.add_parser("batch", help="Batch process cryptographic blind signature operations from CSV")
+    p_batch.add_argument("-i", "--input", required=True, help="Input CSV file path")
+    p_batch.add_argument("-o", "--output", default="results.csv", help="Output CSV file path")
+
     # Subcommand: interactive
     subparsers.add_parser("interactive", help="Interactive REPL session")
 
@@ -275,6 +422,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_zk_proof(args)
     elif args.command == "double-spend":
         return cmd_double_spend(args)
+    elif args.command == "batch":
+        return cmd_batch(args)
     elif args.command == "interactive":
         return cmd_interactive()
     return 0

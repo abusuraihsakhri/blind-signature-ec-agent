@@ -1,133 +1,198 @@
-# Blind Signature Ec Agent
+# Elliptic Curve Blind Signature Agent (`blind-signature-ec-agent`)
 
-> **Domain:** Post-Quantum Cryptography & Zero-Knowledge Architecture  
-> **Reference Guidelines & Standards:** `NIST FIPS 203/204/205, NIST SP 800-90B & ISO/IEC Standards`
-
-<div align="center">
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-3776AB.svg?logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688.svg?logo=fastapi&logoColor=white)
-![Audit Trail](https://img.shields.io/badge/Audit-HMAC--SHA256_Tamper--Evident-brightgreen.svg)
-![Zero-PHI Guard](https://img.shields.io/badge/Guard-Zero--PHI_Outbound-blue.svg)
-![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker&logoColor=white)
-
-</div>
+Production-grade, zero-dependency implementation of **Pointcheval–Stern & Chaum-style Blind Signatures** over the **secp256k1** elliptic curve, equipped with **Schnorr Zero-Knowledge Proofs of Knowledge (ZKP)**, **Pedersen Commitments**, and a **Double-Spending Token Registry**.
 
 ---
 
-## 📖 What It Does
+## 1. Theoretical Foundations & Mathematical Formulations
 
-**Blind Signature Ec Agent** is an advanced analytical and computational platform implementing Blind-signature RSA & ECC anonymous token authentication & double-spend interceptor.
+Blind signatures, introduced by **David Chaum (1983)**, allow a client to obtain a valid digital signature on a message $m$ from an authority without disclosing the content of $m$ or the unblinded signature $(T, \sigma)$. In decentralized e-cash, secret-ballot e-voting, and privacy-preserving credential issuance, elliptic-curve variants dramatically reduce bandwidth, verification overhead, and storage requirements compared to RSA-based schemes.
 
-Elliptic Curve Blind Signature & Cryptographic Token Engine
-===========================================================
-Production-grade implementation of Pointcheval-Stern style Blind Signatures
-over secp256k1, Pedersen Commitments, and Zero-Knowledge Proofs (ZKP).
+### Curve Domain Parameters: secp256k1
+The cryptographic operations occur over the Koblitz curve defined by the Weierstraß equation:
+$$E(\mathbb{F}_p): y^2 \equiv x^3 + 7 \pmod p$$
+where:
+- Prime field modulus:
+  $$p = 2^{256} - 2^{32} - 977 = \text{0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F}$$
+- Group generator point: $G = (G_x, G_y) \in E(\mathbb{F}_p)$
+- Prime order of base point $G$:
+  $$q = n = \text{0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141}$$
+- Cofactor: $h = 1$
 
-Mathematical Specification:
-1. Curve: secp256k1 (y^2 = x^3 + 7 mod p)
-2. Blind Signature Protocol:
-   - Signer generates keypair (d, Q = d*G) and nonce commitment R = k*G
-   - Client blinds with secret scalars alpha, beta:
-       T = alpha*R + beta*G
-       c = H(m || T_x) mod n
-       c_hat = c * alpha^(-1) mod n
-   - Signer signs blinded challenge:
-       s_hat = k + c_hat*d mod n
-   - Client unblinds signature:
-       sigma = alpha*s_hat + beta mod n
-   - Anyone verifies:
-       sigma*G == T + c*Q  (where c = H(m || T_x))
-3. Zero-Knowledge Proof of Knowledge (Schnorr PoK of discrete log)
-4. Double-Spend Token Registry with commitment nonces
+### Key Generation
+The signer selects a uniform random private key $d$:
+$$d \xleftarrow{\$} \mathbb{Z}_q^*$$
+and computes the public key through elliptic curve point multiplication:
+$$Q = d \cdot G$$
 
 ---
 
-## ⚙️ Key Capabilities & Algorithmic Modules
+## 2. Pointcheval–Stern Blind Signature Protocol
 
-### 🔬 Core Algorithmic & Evaluation Engines
+The protocol executes between **Signer** (holding private key $d$) and **Client** (holding message $m$).
 
-- **`CurveParams`** — dedicated module for curve params evaluation and state verification.
-- **`ECDSAUtils`**: Elliptic curve operations for blind signature protocol.
-- **`BlindSignatureProtocol`**: Pedersen blind signature with blinding factor.
-- **`ECPoint`**: Affine point on elliptic curve y^2 = x^3 + B mod P.
-- **`KeyPair`**: Signer public/private keypair.
-- **`BlindSession`**: Client-side state during interactive blind signing.
-
----
-
-## 📐 Mathematical Formulation & Logic
-
-```text
-  return (0, 0)
-  return (x, y)
-  return (k + c_hat * keypair.secret) % N
-  return (session.alpha * s_hat + session.beta) % N
-  return (k - challenge * private_key) % self.q
+```
+       Signer (d, Q = d·G)                               Client (Message m)
+       -------------------                               ------------------
+Step 1: k <-$ Z_q*
+        R = k·G                   ------ R ------>
+                                                 Step 2: alpha, beta <-$ Z_q*
+                                                         T = alpha·R + beta·G
+                                                         c = H(m || T_x) mod q
+                                  <---- c_hat ----       c_hat = c · alpha^(-1) mod q
+Step 3: s_hat = k + c_hat·d mod q
+                                  ---- s_hat ---->
+                                                 Step 4: sigma = alpha·s_hat + beta mod q
+                                                         Unblinded Signature: (T, sigma)
 ```
 
----
+### Protocol Steps
 
-## 💻 CLI Quickstart & Usage
+1. **Step 1: Signer Nonce Commitment**
+   The signer picks an ephemeral secret nonce $k \xleftarrow{\$} \mathbb{Z}_q^*$ and transmits the commitment point:
+   $$R = k \cdot G$$
 
-### 1. Guided Interactive Mode
-```bash
-python cli.py
-```
+2. **Step 2: Client Blinding**
+   The client samples two secret blinding scalar factors $\alpha, \beta \xleftarrow{\$} \mathbb{Z}_q^*$:
+   - Computes blinded commitment point:
+     $$T = \alpha \cdot R + \beta \cdot G$$
+   - Computes challenge scalar from message $m$ and $T_x$:
+     $$c = H(m \parallel T_x) \pmod q$$
+   - Blinds challenge:
+     $$\hat{c} = c \cdot \alpha^{-1} \pmod q$$
+   The client transmits $\hat{c}$ to the signer. Because $\alpha$ is uniformly random, $\hat{c}$ leaks zero information about $m$ or $c$.
 
-### 2. Direct Parameterized Evaluation
-```bash
-python cli.py --json <value> --message <value> --public-key <value> --commitment-t <value>
-```
+3. **Step 3: Signer Blind Signing**
+   The signer signs the blinded challenge without learning $m$ or $T$:
+   $$\hat{s} = k + \hat{c} \cdot d \pmod q$$
+   The signer returns $\hat{s}$ to the client.
 
-### Parameter Reference
-- `--json`: Specifies input measurement or parameter value.
-- `--message`: Specifies input measurement or parameter value.
-- `--public-key`: Specifies input measurement or parameter value.
-- `--commitment-t`: Specifies input measurement or parameter value.
-- `--sigma`: Specifies input measurement or parameter value.
+4. **Step 4: Client Unblinding**
+   The client computes the signature scalar $\sigma$:
+   $$\sigma = \alpha \cdot \hat{s} + \beta \pmod q$$
+   The resulting unblinded signature is the tuple:
+   $$(T, \sigma)$$
 
-### Input Data Schema
-
-| Field | Description | Requirement |
-|:------|:------------|:------------|
-| `suite_name` | Parameter / observation metric | Required |
-| `system_slug` | Parameter / observation metric | Required |
-| `standard_reference` | Parameter / observation metric | Required |
-| `test_cases` | Parameter / observation metric | Required |
-
----
-
-## 🛡️ Security & Enterprise Architecture
-
-* **Zero-PHI Outbound Interceptor:** Active AST and regex inspection blocking SSNs, MRNs, phone numbers, and patient identifiers.
-* **Tamper-Evident HMAC-SHA256 Audit Trail:** Chained, cryptographically signed logs for every evaluation and state transition.
-* **Air-Gapped LLM Reasoning Adapter:** Agnostic integration for local Ollama instances (`llama3`, `mistral`), Claude 3.5 Sonnet, GPT-4o, and deterministic test mocks.
-* **Active Learning Bayesian Calibration:** Dynamic tracker updating worker reliability weights and monitoring Brier calibration drift.
-* **FastAPI & Prometheus Telemetry:** Exposes OpenAPI 3.1 REST endpoints and operational Prometheus metrics (`/metrics`).
+5. **Step 5: Public Verification**
+   Any party can verify that $(T, \sigma)$ is a valid signature on $m$ under public key $Q$:
+   $$\sigma \cdot G \stackrel{?}{=} T + c \cdot Q \quad \text{where } c = H(m \parallel T_x) \pmod q$$
 
 ---
 
-## 🧪 Testing & Verification
+## 3. Mathematical Correctness & Unforgeability Guarantees
 
-Run the automated test suite:
+### Correctness Proof
+Expanding the verification equation:
+$$\begin{aligned}
+\sigma \cdot G &= (\alpha \cdot \hat{s} + \beta) \cdot G \\
+&= (\alpha \cdot (k + \hat{c} \cdot d) + \beta) \cdot G \\
+&= (\alpha \cdot k + \alpha \cdot (c \cdot \alpha^{-1}) \cdot d + \beta) \cdot G \\
+&= (\alpha \cdot k + c \cdot d + \beta) \cdot G \\
+&= (\alpha \cdot k \cdot G + \beta \cdot G) + c \cdot (d \cdot G) \\
+&= (\alpha \cdot R + \beta \cdot G) + c \cdot Q \\
+&= T + c \cdot Q \pmod p
+\end{aligned}$$
+Thus, verification holds with probability 1 for honestly generated transcripts.
 
-```bash
-pytest -v
-```
+### Unlinkability (Blindness)
+For any view $(R, \hat{c}, \hat{s})$ possessed by the signer and any unblinded signature $(T, \sigma)$ on $m$, there exists a unique pair of blinding scalars $(\alpha, \beta) \in (\mathbb{Z}_q^*)^2$ defined by:
+$$\alpha = c \cdot \hat{c}^{-1} \pmod q, \quad \beta = \sigma - \alpha \cdot \hat{s} \pmod q$$
+Since $\alpha$ and $\beta$ are chosen uniformly and independently at random from $\mathbb{Z}_q^*$, the conditional probability distribution of the signer's view given any signature is uniform. Consequently, the signer cannot link an issued blind signature $(T, \sigma)$ to the session that issued it.
 
-Execute high-throughput batch simulation benchmarks:
-
-```bash
-python simulator.py --tasks 1000 --concurrency 8
-```
+### One-More Unforgeability
+Under the discrete logarithm assumption and the Random Oracle Model (ROM), Pointcheval–Stern blind signatures are secure against *one-more forgery attacks*: an adversary requesting $\ell$ blinded signatures cannot construct $\ell + 1$ valid signatures.
 
 ---
 
-## 🐳 Container Deployment
+## 4. Zero-Knowledge Proofs & Double-Spend Registry
+
+- **Schnorr Zero-Knowledge Proof of Knowledge (PoK):** Proves knowledge of the discrete log $d$ such that $Q = d \cdot G$ without revealing $d$:
+  - Commitment: $V = r \cdot G$ for $r \xleftarrow{\$} \mathbb{Z}_q^*$
+  - Challenge: $e = H(Q \parallel V) \pmod q$
+  - Response: $s = r + e \cdot d \pmod q$
+  - Verification: $s \cdot G \stackrel{?}{=} V + e \cdot Q$
+- **Pedersen Commitments:** Homomorphic commitments $C = v \cdot G + r \cdot H$ where $H$ is a deterministic, verified on-curve generator with unknown discrete log relative to $G$.
+- **Double-Spend Token Registry:** Tracks verified commitment points $T$. Any attempt to redeem or spend a token with an already redeemed $T$ is flagged and rejected as a double-spend attempt.
+
+---
+
+## 5. CLI Quickstart & Usage
+
+The application provides a command-line interface `cli.py`:
 
 ```bash
-docker build -t blind-signature-ec-agent .
-docker run -p 8000:8000 blind-signature-ec-agent
+# 1. Generate secp256k1 keypair
+python cli.py keygen --json
+
+# 2. Issue a Pointcheval-Stern blind signature interactively
+python cli.py issue --message "anonymous-ballot-vote" --json
+
+# 3. Verify an unblinded signature
+python cli.py verify \
+  --message "ballot-vote-option-A" \
+  --public-key "02c0ffee..." \
+  --commitment-t "03deadbeef..." \
+  --sigma "3fa0..."
+
+# 4. Generate & verify Schnorr Zero-Knowledge Proof of discrete log
+python cli.py zk-proof --json
+
+# 5. Run Double-Spend redemption test
+python cli.py double-spend --json
+
+# 6. Batch process operations from CSV
+python cli.py batch -i sample.csv -o results.csv
 ```
+
+---
+
+## 6. Python API Quickstart
+
+```python
+from blind_signature_ec import KeyPair, BlindSignatureProtocol, BlindSignature, ZKProofEngine
+
+# 1. Authority generates public/private keypair
+signer_keys = KeyPair.generate()
+
+# 2. Step 1 (Signer): Nonce commitment
+k, R = BlindSignatureProtocol.signer_step1_commit()
+
+# 3. Step 2 (Client): Blind the message
+message = b"confidential-ballot-option-1"
+session, c_hat = BlindSignatureProtocol.client_step2_blind(message, R)
+
+# 4. Step 3 (Signer): Signs blinded challenge (never sees message)
+s_hat = BlindSignatureProtocol.signer_step3_sign(c_hat, k, signer_keys)
+
+# 5. Step 4 (Client): Unblinds signature
+sig = BlindSignatureProtocol.client_step4_unblind(session, s_hat)
+
+# 6. Step 5 (Anyone): Publicly verifies unblinded signature
+assert BlindSignatureProtocol.verify(sig, signer_keys.public_key)
+print("Signature verified successfully! Point T:", sig.T.to_hex(compressed=True))
+
+# 7. Schnorr Zero-Knowledge Proof
+zk_proof = ZKProofEngine.schnorr_pok_prove(signer_keys.secret_key)
+assert ZKProofEngine.schnorr_pok_verify(zk_proof)
+print("Zero-Knowledge Proof verified!")
+```
+
+---
+
+## 7. Testing & Verification
+
+Run the test suite:
+```bash
+python -m pytest -p no:zarr -v
+```
+
+Execute batch CLI verification:
+```bash
+python cli.py batch -i sample.csv -o out_smoke.csv
+```
+
+---
+
+## 8. License
+
+MIT License. Copyright (c) 2026 Dr. Abu Suraih Sakhri.

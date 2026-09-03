@@ -322,5 +322,34 @@ class TestAdditionalCryptoProperties(unittest.TestCase):
         self.assertTrue(BlindSignatureProtocol.verify(sig, kp.public_key))
 
 
+    def test_cli_batch(self):
+        import tempfile
+        import os
+        import csv
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, encoding="utf-8") as f_in:
+            writer = csv.DictWriter(f_in, fieldnames=["token_id", "message", "operation"])
+            writer.writeheader()
+            writer.writerow({"token_id": "TEST-001", "message": "msg-alpha", "operation": "issue_and_verify"})
+            writer.writerow({"token_id": "TEST-002", "message": "msg-beta", "operation": "tampered_signature"})
+            in_path = f_in.name
+
+        out_path = in_path + ".out.csv"
+        try:
+            ret = main(["batch", "-i", in_path, "-o", out_path])
+            self.assertEqual(ret, 0)
+            self.assertTrue(os.path.exists(out_path))
+            with open(out_path, mode="r", encoding="utf-8") as f_out:
+                reader = list(csv.DictReader(f_out))
+                self.assertEqual(len(reader), 2)
+                self.assertEqual(reader[0]["verification_result"], "PASS")
+                self.assertEqual(reader[1]["verification_result"], "FAIL")
+                self.assertEqual(reader[0]["zk_verification_result"], "PASS")
+        finally:
+            if os.path.exists(in_path):
+                os.remove(in_path)
+            if os.path.exists(out_path):
+                os.remove(out_path)
+
+
 if __name__ == "__main__":
     unittest.main()
